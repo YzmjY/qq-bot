@@ -1,12 +1,49 @@
 package agent
 
 import (
-	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
+	"strings"
+
+	"github.com/rs/zerolog/log"
 )
+
+type Agent interface {
+	HandleEvent(ctx context.Context, event *Event) error
+	SendGroupMsg(ctx context.Context, groupID int64, msg []byte) error
+}
+
+type Event struct {
+	SelfID      int64  `json:"self_id"`
+	UserID      int    `json:"user_id"`
+	Time        int    `json:"time"`
+	MessageID   int    `json:"message_id"`
+	MessageSeq  int    `json:"message_seq"`
+	RealID      int    `json:"real_id"`
+	MessageType string `json:"message_type"`
+	Sender      struct {
+		UserID   int    `json:"user_id"`
+		Nickname string `json:"nickname"`
+		Card     string `json:"card"`
+		Role     string `json:"role"`
+	} `json:"sender"`
+	RawMessage string `json:"raw_message"`
+	Font       int    `json:"font"`
+	SubType    string `json:"sub_type"`
+	Message    []struct {
+		Type string `json:"type"`
+		Data struct {
+			Text string `json:"text"`
+		} `json:"data"`
+	} `json:"message"`
+	MessageFormat string `json:"message_format"`
+	PostType      string `json:"post_type"`
+	GroupID       int    `json:"group_id"`
+}
+
+type Handler func(ctx context.Context, event *Event) error
 
 const Name = "napcat"
 
@@ -15,53 +52,97 @@ type napcatConfig struct {
 	ServerAddr  string `yaml:"server_addr"`
 	ServerPort  string `yaml:"server_port"`
 	ServerToken string `yaml:"server_token"`
-
-	// 接收服务端推送事件的地址
-	EventAddr  string `yaml:"event_addr"`
-	EventPort  string `yaml:"event_port"`
-	EventToken string `yaml:"event_token"`
 }
 
 type NapcatAgent struct {
 	napcatConfig
 
-	eventCB EventCb
-	eventCh chan []byte
+	eventHandler []Handler
+	eventCh      chan []byte
 
 	ctx    context.Context
 	cancel context.CancelFunc
+
+	cli *http.Client
 }
 
 func NewNapcatAgent(ctx context.Context, params map[string]string) (Agent, error) {
-	return &NapcatAgent{
+	agent := &NapcatAgent{
 		napcatConfig: napcatConfig{
-			ServerAddr:  params["server_addr"],
-			ServerPort:  params["server_port"],
-			ServerToken: params["server_token"],
-			EventAddr:   params["event_addr"],
-			EventPort:   params["event_port"],
-			EventToken:  params["event_token"],
+			ServerAddr: params["server_addr"],
+			ServerPort: params["server_port"],
 		},
-	}, nil
+	}
+
+	agent.ctx, agent.cancel = context.WithCancel(ctx)
+	agent.eventCh = make(chan []byte, 1024)
+
+	return agent, nil
 }
 
-func (a *NapcatAgent) Start(ctx context.Context) error {
+func (a *NapcatAgent) HandleEvent(ctx context.Context, event *Event) error {
+	for _, h := range a.eventHandler {
+		if err := h(ctx, event); err != nil {
+			log.Error().Err(err).Msg("handle event error")
+		}
+	}
 	return nil
 }
 
-func (a *NapcatAgent) activate() {
-	a.serveForEvent()
+func (a *NapcatAgent) SendMsg(ctx context.Context, msg []byte) error {
+	return nil
 }
 
-func (a *NapcatAgent) serveForEvent() {
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		buf := bytes.Buffer{}
-		io.Copy(&buf, r.Body)
-
-		a.eventCh <- buf.Bytes()
-	})
-
-	http.ListenAndServe(fmt.Sprintf("%s:%s", a.EventAddr, a.EventPort), handler)
+type TextMessage struct {
+	Type string      `json:"type"`
+	Data TextMsgData `json:"data"`
 }
 
-func (a *NapcatAgent) SendMsg()
+type TextMsgData struct {
+	Text string `json:"text"`
+}
+type GroupMsg struct {
+	GroupID int64         `json:"group_id"`
+	Message []TextMessage `json:"message"`
+}
+
+func (a *NapcatAgent) SendGroupMsg(ctx context.Context, groupID int64, msg []byte) error {
+	url := "http://localhost:3000/send_group_msg"
+	method := "POST"
+
+	groupMsg := GroupMsg{
+		GroupID: groupID,
+		Message: []TextMessage{
+			{
+				Type: "text",
+				Data: TextMsgData{
+					Text: string(msg),
+				},
+			},
+		},
+	}
+	all, err := json.Marshal(groupMsg)
+	if err != nil {
+		log.Error().Err(err).Msg("marshal group msg error")
+	}
+
+	payload := strings.NewReader(string(all))
+
+	client := &http.Client{}
+	req, err := http.NewRequest(method, url, payload)
+
+	if err != nil {
+		fmt.Println(err)
+		return nil
+	}
+	req.Header.Add("Content-Type", "application/json")
+
+	res, err := client.Do(req)
+	if err != nil {
+		log.Error().Err(err).Msg("send group msg error")
+		return err
+	}
+	defer res.Body.Close()
+
+	return nil
+}

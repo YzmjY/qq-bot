@@ -1,0 +1,7 @@
+$headers = New-Object "System.Collections.Generic.Dictionary[[String],[String]]"
+$headers.Add("Content-Type", "application/json")
+
+$body = "{`n    `"group_id`": `"127959322`",`n    `"message`": [`n        {`n            `"type`": `"text`",`n            `"data`": {`n                `"text`": `"napcat`"`n            }`n        }`n    ]`n}"
+
+$response = Invoke-RestMethod 'http://127.0.0.1:3000/send_group_msg' -Method 'POST' -Headers $headers -Body $body
+$response | ConvertTo-Json
